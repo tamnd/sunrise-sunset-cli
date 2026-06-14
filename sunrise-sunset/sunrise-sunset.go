@@ -1,35 +1,31 @@
-// Package sunrise-sunset is the library behind the sunrise-sunset command line:
-// the HTTP client, request shaping, and the typed data models for sunrise-sunset.
+// Package sunrisesunset is the library behind the sunrise-sunset command line:
+// the HTTP client, request shaping, and the typed data models for
+// api.sunrise-sunset.org.
 //
-// The Client here is the spine every command shares. It sets a real
-// User-Agent, paces requests so a busy session stays polite, and retries the
-// transient failures (429 and 5xx) that any public site throws under load.
-// Build your endpoint calls and JSON decoding on top of it.
-package sunrise-sunset
+// The Client is the spine every command shares. It sets a real User-Agent,
+// paces requests so a busy session stays polite, and retries the transient
+// failures (429 and 5xx) that any public site throws under load.
+package sunrisesunset
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
-	"regexp"
-	"strings"
 	"time"
 )
 
-// DefaultUserAgent identifies the client to sunrise-sunset. A real, honest
-// User-Agent is both polite and the thing most likely to keep you unblocked.
-const DefaultUserAgent = "sunrise-sunset/dev (+https://github.com/tamnd/sunrise-sunset-cli)"
+// DefaultUserAgent identifies the client to the API.
+const DefaultUserAgent = "sunrise-sunset-cli/dev (+https://github.com/tamnd/sunrise-sunset-cli)"
 
-// Host is the site this client talks to, and the host the URI driver in
-// domain.go claims. The scaffold points it at sunrise-sunset.com; change it once you
-// know the real endpoints you want to read.
-const Host = "sunrise-sunset.com"
+// Host is the API hostname.
+const Host = "api.sunrise-sunset.org"
 
 // BaseURL is the root every request is built from.
 const BaseURL = "https://" + Host
 
-// Client talks to sunrise-sunset over HTTP.
+// Client talks to api.sunrise-sunset.org over HTTP.
 type Client struct {
 	HTTP      *http.Client
 	UserAgent string
@@ -51,9 +47,8 @@ func NewClient() *Client {
 	}
 }
 
-// Get fetches url and returns the response body. It paces and retries according
-// to the client's settings. The caller owns nothing extra; the body is read
-// fully and closed here.
+// Get fetches url and returns the response body. It paces and retries
+// according to the client's settings.
 func (c *Client) Get(ctx context.Context, url string) ([]byte, error) {
 	var lastErr error
 	for attempt := 0; attempt <= c.Retries; attempt++ {
@@ -123,78 +118,84 @@ func backoff(attempt int) time.Duration {
 	return d
 }
 
-// Page is the scaffold's one example record: a single page, addressed by the
-// path that names it on sunrise-sunset.com. It is a stand-in for the typed records you
-// will model from the real sunrise-sunset endpoints. The kit struct tags make it
-// addressable as a resource URI (see domain.go): ID is the URI id, and Body is
-// the long text `sunrise-sunset cat` and the Markdown export print.
-type Page struct {
-	ID    string `json:"id" kit:"id"`
-	URL   string `json:"url"`
-	Title string `json:"title,omitempty"`
-	Body  string `json:"body,omitempty" kit:"body"`
+// SolarInfo holds the sunrise/sunset data for a given location and date.
+type SolarInfo struct {
+	ID                    string  `kit:"id" json:"id"`
+	Latitude              float64 `json:"latitude"`
+	Longitude             float64 `json:"longitude"`
+	Date                  string  `json:"date"`
+	Sunrise               string  `json:"sunrise"`
+	Sunset                string  `json:"sunset"`
+	SolarNoon             string  `json:"solar_noon"`
+	DayLength             string  `json:"day_length"`
+	CivilTwilightBegin    string  `json:"civil_twilight_begin"`
+	CivilTwilightEnd      string  `json:"civil_twilight_end"`
+	NauticalTwilightBegin string  `json:"nautical_twilight_begin"`
+	NauticalTwilightEnd   string  `json:"nautical_twilight_end"`
+	AstroTwilightBegin    string  `json:"astro_twilight_begin"`
+	AstroTwilightEnd      string  `json:"astro_twilight_end"`
+	Timezone              string  `json:"timezone"`
 }
 
-// GetPage fetches one page by its path (for example "wiki/Go") and returns it as
-// a record. The scaffold keeps a plain-text preview of the response as the body;
-// replace the parsing with the real fields once you know the endpoint's shape.
-func (c *Client) GetPage(ctx context.Context, path string) (*Page, error) {
-	path = strings.Trim(path, "/")
-	url := BaseURL + "/" + path
+// apiResponse mirrors the wire format from api.sunrise-sunset.org/json.
+type apiResponse struct {
+	Results struct {
+		Sunrise                   string `json:"sunrise"`
+		Sunset                    string `json:"sunset"`
+		SolarNoon                 string `json:"solar_noon"`
+		DayLength                 string `json:"day_length"`
+		CivilTwilightBegin        string `json:"civil_twilight_begin"`
+		CivilTwilightEnd          string `json:"civil_twilight_end"`
+		NauticalTwilightBegin     string `json:"nautical_twilight_begin"`
+		NauticalTwilightEnd       string `json:"nautical_twilight_end"`
+		AstronomicalTwilightBegin string `json:"astronomical_twilight_begin"`
+		AstronomicalTwilightEnd   string `json:"astronomical_twilight_end"`
+	} `json:"results"`
+	Status string `json:"status"`
+	Tzid   string `json:"tzid"`
+}
+
+// GetSolar fetches solar data for the given coordinates and optional date.
+// Pass an empty date string to get today's data in UTC.
+func (c *Client) GetSolar(ctx context.Context, lat, lng float64, date string) (*SolarInfo, error) {
+	url := fmt.Sprintf("%s/json?lat=%g&lng=%g", BaseURL, lat, lng)
+	if date != "" {
+		url += "&date=" + date
+	}
+
 	body, err := c.Get(ctx, url)
 	if err != nil {
 		return nil, err
 	}
-	return &Page{ID: path, URL: url, Title: path, Body: pageText(body)}, nil
-}
 
-// PageLinks fetches a page and returns the same-host pages it links to, as page
-// stubs. It shows the member-listing pattern the URI driver relies on: every
-// stub carries enough (an id and a URL) to be addressed and followed on its own.
-func (c *Client) PageLinks(ctx context.Context, path string, limit int) ([]*Page, error) {
-	path = strings.Trim(path, "/")
-	body, err := c.Get(ctx, BaseURL+"/"+path)
-	if err != nil {
-		return nil, err
+	var resp apiResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, fmt.Errorf("decode solar response: %w", err)
 	}
-	var out []*Page
-	seen := map[string]bool{}
-	for _, p := range linkPaths(body) {
-		if seen[p] {
-			continue
-		}
-		seen[p] = true
-		out = append(out, &Page{ID: p, URL: BaseURL + "/" + p})
-		if limit > 0 && len(out) >= limit {
-			break
-		}
+	if resp.Status != "OK" {
+		return nil, fmt.Errorf("api error: status %q", resp.Status)
 	}
-	return out, nil
-}
 
-var (
-	hrefRE = regexp.MustCompile(`href="(/[^":#?]+)"`)
-	tagRE  = regexp.MustCompile(`<[^>]+>`)
-)
-
-// linkPaths pulls the relative link targets out of an HTML response, so a list
-// op can turn each into an addressable page stub.
-func linkPaths(body []byte) []string {
-	var out []string
-	for _, m := range hrefRE.FindAllSubmatch(body, -1) {
-		if p := strings.Trim(string(m[1]), "/"); p != "" {
-			out = append(out, p)
-		}
+	d := date
+	if d == "" {
+		d = "today"
 	}
-	return out
-}
 
-// pageText reduces an HTML response to a short plain-text preview, a stand-in
-// for the typed extract a real endpoint would hand you.
-func pageText(body []byte) string {
-	s := strings.Join(strings.Fields(tagRE.ReplaceAllString(string(body), " ")), " ")
-	if len(s) > 500 {
-		s = s[:500]
-	}
-	return s
+	return &SolarInfo{
+		ID:                    fmt.Sprintf("%g,%g,%s", lat, lng, d),
+		Latitude:              lat,
+		Longitude:             lng,
+		Date:                  d,
+		Sunrise:               resp.Results.Sunrise,
+		Sunset:                resp.Results.Sunset,
+		SolarNoon:             resp.Results.SolarNoon,
+		DayLength:             resp.Results.DayLength,
+		CivilTwilightBegin:    resp.Results.CivilTwilightBegin,
+		CivilTwilightEnd:      resp.Results.CivilTwilightEnd,
+		NauticalTwilightBegin: resp.Results.NauticalTwilightBegin,
+		NauticalTwilightEnd:   resp.Results.NauticalTwilightEnd,
+		AstroTwilightBegin:    resp.Results.AstronomicalTwilightBegin,
+		AstroTwilightEnd:      resp.Results.AstronomicalTwilightEnd,
+		Timezone:              resp.Tzid,
+	}, nil
 }
