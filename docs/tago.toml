@@ -1,0 +1,10 @@
+title       = "sunrise-sunset"
+baseURL     = "https://sunrise-sunset-cli.tamnd.com/"
+description = "A command line for sunrise-sunset.org."
+contentDir  = "content"
+outputDir   = "public"
+theme       = "tago-doks"
+syntaxHighlight = "true"
+
+[params]
+github = "https://github.com/tamnd/sunrise-sunset-cli"
